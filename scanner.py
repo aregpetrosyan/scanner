@@ -14,7 +14,7 @@ sia = SentimentIntensityAnalyzer()
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-VIX_THRESHOLD = 30  # Don't buy if market fear is extreme
+VIX_THRESHOLD = 35  # Slightly higher threshold for "dip hunters"
 
 def send_telegram(message):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
@@ -22,13 +22,10 @@ def send_telegram(message):
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"})
 
 def get_market_sentiment():
-    """Returns the current VIX level as a fear gauge"""
     try:
         vix = yf.Ticker("^VIX")
-        current_vix = vix.history(period="1d")['Close'].iloc[-1]
-        return current_vix
-    except:
-        return 20.0 # Default to 'normal' if API fails
+        return vix.history(period="1d")['Close'].iloc[-1]
+    except: return 20.0
 
 def get_context(symbol):
     try:
@@ -45,28 +42,26 @@ def get_context(symbol):
 
 def scan():
     vix_now = get_market_sentiment()
-    
-    # Global Filter: If VIX is too high, the risk is too great
     if vix_now > VIX_THRESHOLD:
-        send_telegram(f"⚠️ *Market Alert:* VIX is at `{vix_now:.2f}` (High Fear). Scanning paused to avoid falling knives.")
+        send_telegram(f"⚠️ *Panic Alert:* VIX is `{vix_now:.2f}`. Market is too volatile for safe entries.")
         return
 
     with open("tickers.txt", "r") as f:
         tickers = [line.strip().upper() for line in f if line.strip()]
 
     results = []
-    send_telegram(f"🔍 *Market Calm (VIX: {vix_now:.2f})* | Scanning {len(tickers)} Titans...")
+    send_telegram(f"🔥 *Dip Hunt Active* (VIX: {vix_now:.2f}) | Checking {len(tickers)} targets...")
 
     for symbol in tickers:
         try:
             stock = yf.Ticker(symbol)
-            hist = stock.history(period="1y") # 1y for SMA checks
-            if len(hist) < 200: continue
+            hist = stock.history(period="6mo")
+            if len(hist) < 20: continue
 
-            # 1. Trend Filter: Price must be above 200-day SMA
-            sma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
+            # 1. Price vs 5-Day High (Is it recovering?)
             curr_price = hist['Close'].iloc[-1]
-            if curr_price < sma_200: continue 
+            five_day_high = hist['Close'].iloc[-6:-1].max()
+            recovery_gap = (five_day_high - curr_price) / curr_price
 
             # 2. RSI Calculation
             delta = hist['Close'].diff()
@@ -74,19 +69,22 @@ def scan():
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
             rsi = (100 - (100 / (1 + (gain / loss)))).iloc[-1]
 
-            # 3. Volume Surge
+            # 3. Volume Surge (Key for reversals)
             avg_vol = hist['Volume'].iloc[-21:-1].mean()
             curr_vol = hist['Volume'].iloc[-1]
             vol_ratio = curr_vol / avg_vol
 
-            # 4. Upside
+            # 4. Analyst Upside
             info = stock.info
             target = info.get('targetMeanPrice', curr_price)
             upside = (target - curr_price) / curr_price
 
-            if rsi < 45:
+            # TARGET: Deep Dips (RSI < 40)
+            if rsi < 40:
                 sentiment, news = get_context(symbol)
-                score = ((50 - rsi) * 1.2) + (vol_ratio * 10) + (upside * 100) + (sentiment * 5)
+                
+                # REVERSAL SCORE: Heavier weight on Volume and Recovery Gap
+                score = ((45 - rsi) * 2) + (vol_ratio * 15) + (upside * 100) + (recovery_gap * 50)
                 
                 results.append({
                     "symbol": symbol, "score": score, "rsi": rsi, 
@@ -100,7 +98,7 @@ def scan():
     top_5 = results[:5]
 
     if top_5:
-        msg = f"🎯 *TOP DEALS (VIX: {vix_now:.2f})* 🎯\n\n"
+        msg = f"📉 *TOP 5 REVERSAL OPPORTUNITIES* (VIX: {vix_now:.2f})\n\n"
         for i, res in enumerate(top_5):
             msg += f"*{i+1}. {res['symbol']}* (Score: {res['score']:.1f})\n"
             msg += f"💰 ${res['price']:.2f} | RSI: {res['rsi']:.1f}\n"
