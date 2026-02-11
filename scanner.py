@@ -14,7 +14,7 @@ sia = SentimentIntensityAnalyzer()
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-VIX_THRESHOLD = 35  # Slightly higher threshold for "dip hunters"
+VIX_THRESHOLD = 35 
 
 def send_telegram(message):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
@@ -43,14 +43,14 @@ def get_context(symbol):
 def scan():
     vix_now = get_market_sentiment()
     if vix_now > VIX_THRESHOLD:
-        send_telegram(f"⚠️ *Panic Alert:* VIX is `{vix_now:.2f}`. Market is too volatile for safe entries.")
+        send_telegram(f"⚠️ *VIX High ({vix_now:.2f}):* Market panic detected. Standing by.")
         return
 
     with open("tickers.txt", "r") as f:
         tickers = [line.strip().upper() for line in f if line.strip()]
 
     results = []
-    send_telegram(f"🔥 *Dip Hunt Active* (VIX: {vix_now:.2f}) | Checking {len(tickers)} targets...")
+    send_telegram(f"🚀 *Scan Start* (VIX: {vix_now:.2f}) | Monitoring {len(tickers)} stocks...")
 
     for symbol in tickers:
         try:
@@ -58,51 +58,50 @@ def scan():
             hist = stock.history(period="6mo")
             if len(hist) < 20: continue
 
-            # 1. Price vs 5-Day High (Is it recovering?)
-            curr_price = hist['Close'].iloc[-1]
-            five_day_high = hist['Close'].iloc[-6:-1].max()
-            recovery_gap = (five_day_high - curr_price) / curr_price
-
-            # 2. RSI Calculation
+            # --- VOLUME NORMALIZATION ---
+            # Compare current volume to YESTERDAY'S total volume
+            # This makes the ratio 1.0 if we match yesterday's pace
+            yesterday_vol = hist['Volume'].iloc[-2]
+            current_vol = hist['Volume'].iloc[-1]
+            vol_ratio = current_vol / yesterday_vol
+            
+            # --- RSI & UPSIDE ---
             delta = hist['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
             rsi = (100 - (100 / (1 + (gain / loss)))).iloc[-1]
 
-            # 3. Volume Surge (Key for reversals)
-            avg_vol = hist['Volume'].iloc[-21:-1].mean()
-            curr_vol = hist['Volume'].iloc[-1]
-            vol_ratio = curr_vol / avg_vol
-
-            # 4. Analyst Upside
             info = stock.info
+            curr_price = hist['Close'].iloc[-1]
             target = info.get('targetMeanPrice', curr_price)
             upside = (target - curr_price) / curr_price
 
-            # TARGET: Deep Dips (RSI < 40)
-            if rsi < 40:
+            # CRITERIA: RSI under 42 (Oversold territory)
+            if rsi < 42:
                 sentiment, news = get_context(symbol)
                 
-                # REVERSAL SCORE: Heavier weight on Volume and Recovery Gap
-                score = ((45 - rsi) * 2) + (vol_ratio * 15) + (upside * 100) + (recovery_gap * 50)
+                # New Score: Higher weight to RSI and Upside since SMA is gone
+                score = ((45 - rsi) * 2.5) + (vol_ratio * 15) + (upside * 120)
                 
                 results.append({
                     "symbol": symbol, "score": score, "rsi": rsi, 
                     "vol": vol_ratio, "upside": upside * 100, 
                     "news": news, "price": curr_price
                 })
-            time.sleep(1.2)
+            time.sleep(1.1)
         except: continue
 
     results.sort(key=lambda x: x['score'], reverse=True)
     top_5 = results[:5]
 
     if top_5:
-        msg = f"📉 *TOP 5 REVERSAL OPPORTUNITIES* (VIX: {vix_now:.2f})\n\n"
+        msg = f"📉 *TOP 5 REVERSAL OPPORTUNITIES*\n\n"
         for i, res in enumerate(top_5):
+            # Volume Emoji: 🔥 for high interest, ❄️ for low interest
+            v_emoji = "🔥" if res['vol'] > 1.0 else "❄️"
             msg += f"*{i+1}. {res['symbol']}* (Score: {res['score']:.1f})\n"
             msg += f"💰 ${res['price']:.2f} | RSI: {res['rsi']:.1f}\n"
-            msg += f"📊 Vol: {res['vol']:.1f}x | Upside: {res['upside']:.1f}%\n"
+            msg += f"📊 Vol: {res['vol']:.2f}x {v_emoji} | Upside: {res['upside']:.1f}%\n"
             msg += f"📰 `{res['news'][:70]}...`\n\n"
         send_telegram(msg)
 
