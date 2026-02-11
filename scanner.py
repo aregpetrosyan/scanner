@@ -2,6 +2,7 @@ import yfinance as yf
 import requests
 import os
 import time
+from datetime import datetime, timedelta
 
 # --- SETUP ---
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY")
@@ -11,19 +12,38 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 def send_telegram(message):
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message})
+        # Using parse_mode 'Markdown' for better formatting
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"})
 
-def get_sentiment(symbol):
+def get_stock_context(symbol):
+    """Fetches the latest news headline and sentiment score"""
     try:
-        url = f"https://finnhub.io/api/v1/news-sentiment?symbol={symbol}&token={FINNHUB_KEY}"
-        res = requests.get(url).json()
-        return res.get('sentiment', {}).get('bullishPercent', 0.5)
-    except: return 0.5
+        # 1. Get Sentiment Score
+        sent_url = f"https://finnhub.io/api/v1/news-sentiment?symbol={symbol}&token={FINNHUB_KEY}"
+        sentiment = requests.get(sent_url).json().get('sentiment', {}).get('bullishPercent', 0.5)
+
+        # 2. Get Latest Headline
+        # Finnhub requires a date range for company news
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
+        
+        news_url = f"https://finnhub.io/api/v1/company-news?symbol={symbol}&from={start_date}&to={end_date}&token={FINNHUB_KEY}"
+        news_data = requests.get(news_url).json()
+        
+        headline = "No recent news found."
+        if news_data and len(news_data) > 0:
+            headline = news_data[0].get('headline', 'No headline available.')
+            
+        return sentiment, headline
+    except:
+        return 0.5, "Error fetching news context."
 
 def scan():
     results = []
     with open("tickers.txt", "r") as f:
         tickers = [line.strip().upper() for line in f if line.strip()]
+
+    send_telegram("🔍 *Scan Started:* Analyzing Top 100 for the best dips...")
 
     for symbol in tickers:
         try:
@@ -36,34 +56,30 @@ def scan():
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
             rsi = 100 - (100 / (1 + (gain / loss))).iloc[-1]
 
-            # TARGET: RSI < 35 (Slightly looser to catch more deals)
-            if rsi < 35:
-                sentiment = get_sentiment(symbol)
+            # Aggressive Target: RSI < 38
+            if rsi < 38:
+                sentiment, headline = get_stock_context(symbol)
                 deal_score = (100 - rsi) * sentiment
                 
-                # Reasoning Logic
-                if sentiment > 0.7: reason = "💎 Irrational Dip: Market panic vs Strong News."
-                elif sentiment > 0.5: reason = "📈 Healthy Pullback: Uptrend remains intact."
-                else: reason = "⚠️ Risky Dip: News sentiment is weak."
-
                 results.append({
                     "symbol": symbol, "score": deal_score, "rsi": rsi, 
-                    "sentiment": sentiment, "reason": reason, "price": df['Close'].iloc[-1]
+                    "sentiment": sentiment, "headline": headline, "price": df['Close'].iloc[-1]
                 })
-            time.sleep(0.2) # Faster scan
+            time.sleep(0.3) # Respect API limits
         except: continue
 
+    # Sort by the best "Spring Effect"
     results.sort(key=lambda x: x['score'], reverse=True)
 
     if results:
-        msg = "🏆 TOP 5 BEST DEALS 🏆\n\n"
-        for i, res in enumerate(results[:5]):
-            msg += f"{i+1}. {res['symbol']} (Score: {res['score']:.1f})\n"
-            msg += f"{res['reason']}\n"
-            msg += f"💰 ${res['price']:.2f} | RSI: {res['rsi']:.1f}\n\n"
+        msg = "🏆 *TOP 10 BEST DIP DEALS* 🏆\n\n"
+        for i, res in enumerate(results[:10]):
+            msg += f"*{i+1}. {res['symbol']}* (Score: {res['score']:.1f})\n"
+            msg += f"📰 `{res['headline'][:100]}...`\n" # Truncate long headlines
+            msg += f"💰 ${res['price']:.2f} | RSI: {res['rsi']:.1f} | Bullish: {res['sentiment']*100:.0f}%\n\n"
         send_telegram(msg)
     else:
-        send_telegram("😴 No high-quality dips found in the last scan.")
+        send_telegram("😴 No high-quality dips found. Market may be overbought.")
 
 if __name__ == "__main__":
     scan()
