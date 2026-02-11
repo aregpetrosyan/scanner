@@ -71,4 +71,43 @@ def scan():
 
             # Volume & RSI
             vol_ratio = (hist['Volume'].iloc[-1] / time_mult) / hist['Volume'].iloc[-2]
-            delta = hist['Close
+            delta = hist['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rsi = (100 - (100 / (1 + (gain / loss)))).iloc[-1]
+
+            # Upside & Sentiment
+            info = stock.info
+            curr_price = hist['Close'].iloc[-1]
+            upside = (info.get('targetMeanPrice', curr_price) - curr_price) / curr_price
+            
+            if rsi < 45: # Broadened filter for 2026 volatility
+                sentiment_score, headline = get_news_sentiment(symbol)
+                
+                # FINAL DEAL SCORE FORMULA
+                # High score = Low RSI + High Vol + High Upside + Positive News
+                score = ((50 - rsi) * 1.5) + (vol_ratio * 10) + (upside * 100) + (sentiment_score * 20)
+                
+                results.append({
+                    "symbol": symbol, "score": score, "rsi": rsi, 
+                    "vol": vol_ratio, "upside": upside * 100, 
+                    "sentiment": sentiment_score, "headline": headline, "price": curr_price
+                })
+            time.sleep(1.2) # Finnhub rate limit safety
+        except: continue
+
+    results.sort(key=lambda x: x['score'], reverse=True)
+    top_5 = results[:5]
+
+    if top_5:
+        msg = f"🎯 *TOP 5 REVERSAL DEALS* (VIX: {vix_now:.2f})\n\n"
+        for i, res in enumerate(top_5):
+            s_emoji = "💎" if res['sentiment'] > 0.7 else "⚖️" if res['sentiment'] > 0.4 else "⚠️"
+            msg += f"*{i+1}. {res['symbol']}* (Score: {res['score']:.1f})\n"
+            msg += f"💰 ${res['price']:.2f} | RSI: {res['rsi']:.1f} | {s_emoji}\n"
+            msg += f"📊 Vol: {res['vol']:.2f}x | Upside: {res['upside']:.1f}%\n"
+            msg += f"📰 `{res['headline'][:70]}...`\n\n"
+        send_telegram(msg)
+
+if __name__ == "__main__":
+    scan()
