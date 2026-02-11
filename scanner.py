@@ -459,32 +459,48 @@ class ScoringEngine:
         """
         Score volume patterns
         Returns: (score 0-100, risk_flags)
+        
+        Scoring Logic:
+        - 0.0-0.5x volume = 0 points (very low/concerning)
+        - 0.5-1.0x volume = 0-25 points (below average)
+        - 1.0-1.5x volume = 25-50 points (average)
+        - 1.5-2.5x volume = 50-85 points (good)
+        - 2.5x+ volume = 85-100 points (excellent surge)
         """
         flags = []
         
         surge = volume_metrics['surge_ratio']
         trend = volume_metrics['trend_ratio']
         
-        # Adjust expectations based on market session
-        if session in ['premarket', 'open']:
-            min_surge = 0.5  # Lower threshold early
-        else:
-            min_surge = 1.0
-        
-        # Score volume surge
-        if surge < min_surge:
-            flags.append(f"Low volume: {surge:.2f}x")
+        # Volume surge scoring with realistic thresholds
+        if surge < 0.5:
             surge_score = 0
-        elif surge > 3.0:
-            surge_score = 100  # Strong surge
+            flags.append(f"Very low volume: {surge:.2f}x")
+        elif surge < 1.0:
+            # 0.5-1.0x = 0-25 points (below average)
+            surge_score = ((surge - 0.5) / 0.5) * 25
+            flags.append(f"Below avg volume: {surge:.2f}x")
+        elif surge < 1.5:
+            # 1.0-1.5x = 25-50 points (average)
+            surge_score = 25 + ((surge - 1.0) / 0.5) * 25
+        elif surge < 2.5:
+            # 1.5-2.5x = 50-85 points (good)
+            surge_score = 50 + ((surge - 1.5) / 1.0) * 35
         else:
-            surge_score = ((surge - min_surge) / (3.0 - min_surge)) * 100
+            # 2.5x+ = 85-100 points (excellent)
+            surge_score = min(100, 85 + ((surge - 2.5) / 1.5) * 15)
         
-        # Score volume trend
-        trend_score = min(100, trend * 50)
+        # Score volume trend (5-day vs 20-day average)
+        if trend < 0.8:
+            trend_score = 0
+            flags.append(f"Declining vol trend: {trend:.2f}x")
+        elif trend < 1.0:
+            trend_score = ((trend - 0.8) / 0.2) * 50
+        else:
+            trend_score = min(100, 50 + (trend - 1.0) * 50)
         
-        # Combine
-        volume_score = (surge_score * 0.7) + (trend_score * 0.3)
+        # Combine (surge is more important for dip buying)
+        volume_score = (surge_score * 0.8) + (trend_score * 0.2)
         
         return volume_score, flags
     
@@ -610,6 +626,15 @@ class ScoringEngine:
                 fundamental_score * config.WEIGHT_FUNDAMENTAL +
                 sentiment_score * config.WEIGHT_SENTIMENT
             )
+            
+            # CRITICAL: Apply volume penalty for extremely low volume
+            # Low volume stocks are hard to enter/exit and unreliable for dip buying
+            vol_surge = volume_metrics['surge_ratio']
+            if vol_surge < 0.5:
+                total_score *= 0.3  # Reduce score by 70% if volume is very low
+                risk_flags.append("CRITICAL: Very low volume")
+            elif vol_surge < 0.8:
+                total_score *= 0.6  # Reduce score by 40% if volume is low
             
             return StockScore(
                 symbol=symbol,
