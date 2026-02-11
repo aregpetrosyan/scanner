@@ -27,7 +27,7 @@ def get_context(symbol):
         start_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
         url = f"https://finnhub.io/api/v1/company-news?symbol={symbol}&from={start_date}&to={end_date}&token={FINNHUB_KEY}"
         news = requests.get(url).json()
-        if news and isinstance(news, list):
+        if news and isinstance(news, list) and len(news) > 0:
             headline = news[0].get('headline', 'No news.')
             score = (sia.polarity_scores(headline)['compound'] + 1) / 2
             return score, headline
@@ -39,12 +39,11 @@ def scan():
         tickers = [line.strip().upper() for line in f if line.strip()]
 
     results = []
-    send_telegram(f"🚀 *Scanning {len(tickers)} Titans...* Looking for the Top 5 Deals.")
+    send_telegram(f"🚀 *Scanning {len(tickers)} Titans...* Identifying the Top 5 Deals.")
 
     for symbol in tickers:
         try:
             stock = yf.Ticker(symbol)
-            # Use 6mo for accurate Volume Averages and Analyst info
             hist = stock.history(period="6mo")
             if len(hist) < 20: continue
 
@@ -62,15 +61,17 @@ def scan():
             # 3. Analyst Upside
             info = stock.info
             curr_price = hist['Close'].iloc[-1]
-            target = info.get('targetMeanPrice', curr_price)
+            # Safety check for missing targets
+            target = info.get('targetMeanPrice')
+            if target is None:
+                target = curr_price 
             upside = (target - curr_price) / curr_price
 
             # CRITERIA: RSI under 45 (Starting to get cheap)
             if rsi < 45:
                 sentiment, news = get_context(symbol)
                 
-                # DEAL SCORE FORMULA: 
-                # Points for RSI + Points for Volume + Points for Upside Potential
+                # DEAL SCORE FORMULA
                 score = ((50 - rsi) * 1.2) + (vol_ratio * 10) + (upside * 100) + (sentiment * 5)
                 
                 results.append({
@@ -79,11 +80,11 @@ def scan():
                     "news": news, "price": curr_price
                 })
             
-            time.sleep(1.2) # Avoid API rate limits
+            time.sleep(1.2) # API Rate Limit Safety
         except Exception as e:
             print(f"Error on {symbol}: {e}")
 
-    # Rank by best score and take Top 5
+    # Rank and take Top 5
     results.sort(key=lambda x: x['score'], reverse=True)
     top_5 = results[:5]
 
@@ -92,7 +93,8 @@ def scan():
         for i, res in enumerate(top_5):
             msg += f"*{i+1}. {res['symbol']}* (Score: {res['score']:.1f})\n"
             msg += f"💰 ${res['price']:.2f} | RSI: {res['rsi']:.1f}\n"
-            msg += f"📊 Vol: {res['vol']:.1fx} | Upside: {res['upside']:.1f}%\n"
+            # FIXED FORMATTING HERE:
+            msg += f"📊 Vol: {res['vol']:.1f}x | Upside: {res['upside']:.1f}%\n"
             msg += f"📰 `{res['news'][:75]}...`\n\n"
         send_telegram(msg)
     else:
