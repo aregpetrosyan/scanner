@@ -9,21 +9,64 @@ FAST_WINDOW = 20
 SLOW_WINDOW = 50
 RSI_PERIOD = 14
 VOLUME_PERIOD = 20
-MIN_VOLUME = 100000  # Minimum average volume to consider
+MIN_VOLUME = 100000
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 def send_telegram_msg(message):
+    """Send message to Telegram with detailed error handling"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials missing.")
-        return
+        print("\n" + "="*60)
+        print("⚠️  TELEGRAM NOT CONFIGURED")
+        print("="*60)
+        print("Missing credentials. To enable Telegram notifications:")
+        print("\nLinux/Mac:")
+        print("  export TELEGRAM_TOKEN='your_bot_token'")
+        print("  export TELEGRAM_CHAT_ID='your_chat_id'")
+        print("\nWindows:")
+        print("  set TELEGRAM_TOKEN=your_bot_token")
+        print("  set TELEGRAM_CHAT_ID=your_chat_id")
+        print("\nRun: python test_telegram.py to test your setup")
+        print("="*60 + "\n")
+        return False
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    
     try:
-        requests.post(url, json=payload).raise_for_status()
+        print("\n📤 Sending Telegram message...")
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get('ok'):
+            print("✅ Telegram message sent successfully!")
+            return True
+        else:
+            print(f"❌ Telegram API error: {data.get('description', 'Unknown error')}")
+            print(f"   Error code: {data.get('error_code', 'N/A')}")
+            
+            # Helpful error messages
+            error_desc = str(data.get('description', '')).lower()
+            if 'chat not found' in error_desc:
+                print("\n💡 FIX: Your CHAT_ID is wrong. Send /start to your bot first.")
+            elif 'unauthorized' in error_desc or 'token' in error_desc:
+                print("\n💡 FIX: Your TELEGRAM_TOKEN is wrong. Get it from @BotFather.")
+            elif 'blocked' in error_desc:
+                print("\n💡 FIX: You blocked the bot. Unblock it in Telegram.")
+            
+            return False
+            
+    except requests.exceptions.Timeout:
+        print("❌ Telegram request timeout - check your internet connection")
+        return False
+    except requests.exceptions.ConnectionError:
+        print("❌ Cannot connect to Telegram - check your internet connection")
+        return False
     except Exception as e:
-        print(f"Telegram Error: {e}")
+        print(f"❌ Telegram error: {e}")
+        return False
 
 def calculate_rsi(data, period=14):
     """Calculate Relative Strength Index"""
@@ -46,7 +89,6 @@ def calculate_macd(data, fast=12, slow=26, signal=9):
 def get_momentum_analysis(symbol):
     """Comprehensive momentum analysis"""
     try:
-        # Fetch more historical data for better indicator calculation
         data = yf.download(symbol, period="6mo", interval="1d", progress=False)
         
         if data.empty or len(data) < SLOW_WINDOW:
@@ -67,23 +109,21 @@ def get_momentum_analysis(symbol):
         data['Avg_Volume'] = data['Volume'].rolling(window=VOLUME_PERIOD).mean()
         data['Volume_Ratio'] = data['Volume'] / data['Avg_Volume']
         
-        # Price momentum (rate of change)
+        # Price momentum
         data['ROC_5'] = ((data['Close'] - data['Close'].shift(5)) / data['Close'].shift(5)) * 100
         data['ROC_10'] = ((data['Close'] - data['Close'].shift(10)) / data['Close'].shift(10)) * 100
         data['ROC_20'] = ((data['Close'] - data['Close'].shift(20)) / data['Close'].shift(20)) * 100
         
-        # ATR for volatility (simplified)
+        # ATR
         data['High-Low'] = data['High'] - data['Low']
         data['ATR'] = data['High-Low'].rolling(window=14).mean()
         
-        # Consecutive green/red days
+        # Consecutive days
         data['Daily_Change'] = data['Close'].diff()
         
-        # Get latest values
         latest = data.iloc[-1]
         prev = data.iloc[-2]
         
-        # Extract key metrics
         metrics = {
             'symbol': symbol,
             'price': round(float(latest['Close']), 2),
@@ -126,7 +166,6 @@ def get_momentum_analysis(symbol):
         metrics['consecutive_up'] = consecutive_up
         metrics['consecutive_down'] = consecutive_down
         
-        # Determine signals and momentum status
         metrics['signal'] = determine_signal(metrics)
         metrics['momentum_score'] = calculate_momentum_score(metrics)
         metrics['trend_strength'] = determine_trend_strength(metrics)
@@ -141,34 +180,28 @@ def determine_signal(metrics):
     """Determine trading signal based on multiple indicators"""
     signals = []
     
-    # EMA Crossover
     if metrics['prev_ema_fast'] <= metrics['prev_ema_slow'] and metrics['ema_fast'] > metrics['ema_slow']:
         signals.append("EMA_BULLISH_CROSS")
     elif metrics['prev_ema_fast'] >= metrics['prev_ema_slow'] and metrics['ema_fast'] < metrics['ema_slow']:
         signals.append("EMA_BEARISH_CROSS")
     
-    # MACD Crossover
     prev_macd_hist = metrics['macd'] - metrics['macd_signal']
     if prev_macd_hist <= 0 and metrics['macd_hist'] > 0:
         signals.append("MACD_BULLISH_CROSS")
     elif prev_macd_hist >= 0 and metrics['macd_hist'] < 0:
         signals.append("MACD_BEARISH_CROSS")
     
-    # Momentum signals
     if metrics['ema_fast'] > metrics['ema_slow'] and metrics['price'] > metrics['ema_fast']:
         signals.append("UPTREND")
     elif metrics['ema_fast'] < metrics['ema_slow'] and metrics['price'] < metrics['ema_fast']:
         signals.append("DOWNTREND")
     
-    # Strong momentum
     if metrics['change_5d'] > 5 and metrics['change_10d'] > 8 and metrics['rsi'] < 70:
         signals.append("STRONG_MOMENTUM_UP")
     
-    # Volume confirmation
     if metrics['volume_ratio'] > 1.5:
         signals.append("HIGH_VOLUME")
     
-    # Breakout above 200 EMA
     if metrics['ema_200'] and metrics['price'] > metrics['ema_200'] and metrics['ema_fast'] > metrics['ema_200']:
         signals.append("ABOVE_200EMA")
     
@@ -176,9 +209,8 @@ def determine_signal(metrics):
 
 def calculate_momentum_score(metrics):
     """Calculate overall momentum score (0-100)"""
-    score = 50  # Base score
+    score = 50
     
-    # Trend alignment (max 25 points)
     if metrics['ema_fast'] > metrics['ema_slow']:
         score += 10
         if metrics['price'] > metrics['ema_fast']:
@@ -192,7 +224,6 @@ def calculate_momentum_score(metrics):
         if metrics['ema_200'] and metrics['price'] < metrics['ema_200']:
             score -= 5
     
-    # Price momentum (max 20 points)
     if metrics['change_5d'] > 3:
         score += 10
     elif metrics['change_5d'] < -3:
@@ -203,31 +234,27 @@ def calculate_momentum_score(metrics):
     elif metrics['change_10d'] < -5:
         score -= 10
     
-    # RSI (max 15 points)
     if 40 < metrics['rsi'] < 70:
-        score += 15  # Sweet spot
+        score += 15
     elif metrics['rsi'] > 80 or metrics['rsi'] < 20:
-        score -= 10  # Extreme conditions
+        score -= 10
     
-    # MACD (max 10 points)
     if metrics['macd_hist'] > 0:
         score += 10
     else:
         score -= 10
     
-    # Volume (max 10 points)
     if metrics['volume_ratio'] > 1.5:
         score += 10
     elif metrics['volume_ratio'] < 0.7:
         score -= 5
     
-    # Consecutive days (max 10 points)
     if metrics['consecutive_up'] >= 3:
         score += 10
     elif metrics['consecutive_down'] >= 3:
         score -= 10
     
-    return max(0, min(100, score))  # Clamp between 0-100
+    return max(0, min(100, score))
 
 def determine_trend_strength(metrics):
     """Determine trend strength"""
@@ -261,14 +288,12 @@ def format_stock_report(stock):
 
 📢 *Volume:*
   Current: {stock['volume']:,} ({stock['volume_ratio']:.1f}x avg)
-  Avg: {stock['avg_volume']:,}
 
 🎯 *Signals:* {signals_str}
 """
     return report
 
 if __name__ == "__main__":
-    # Check if tickers.txt exists
     if not os.path.exists("tickers.txt"):
         print("Error: tickers.txt not found!")
         exit(1)
@@ -290,10 +315,12 @@ if __name__ == "__main__":
             all_stocks.append(metrics)
             print(f"✓ Score: {metrics['momentum_score']}")
         else:
-            print("✗ Skipped (low volume or error)")
+            print("✗ Skipped")
     
     if not all_stocks:
-        print("\nNo stocks met the criteria.")
+        print("\n❌ No stocks met the criteria.")
+        # Still send a message so user knows scanner ran
+        send_telegram_msg(f"📊 *Momentum Scanner Report*\n{datetime.now().strftime('%Y-%m-%d %H:%M')}\n\nNo stocks met the criteria today.\nScanned: {len(tickers)} tickers")
         exit(0)
     
     # Sort by momentum score
@@ -304,7 +331,7 @@ if __name__ == "__main__":
     crossover_signals = [s for s in all_stocks if any('CROSS' in sig for sig in s['signal'])]
     high_volume_stocks = [s for s in all_stocks if s['volume_ratio'] >= 2.0]
     
-    # Print console summary
+    # Console summary
     print(f"\n{'='*60}")
     print(f"📊 SCAN RESULTS")
     print(f"{'='*60}")
@@ -314,38 +341,44 @@ if __name__ == "__main__":
     print(f"High Volume (≥2x): {len(high_volume_stocks)}")
     print(f"{'='*60}\n")
     
-    # Prepare Telegram report
+    # Prepare Telegram report - ALWAYS SEND SOMETHING
     telegram_sections = []
     
     if strong_momentum:
         telegram_sections.append("🔥 *TOP MOMENTUM STOCKS*\n")
-        for stock in strong_momentum[:5]:  # Top 5
+        for stock in strong_momentum[:5]:
             telegram_sections.append(format_stock_report(stock))
     
     if crossover_signals:
         telegram_sections.append("\n⚡ *CROSSOVER SIGNALS*\n")
-        for stock in crossover_signals[:3]:  # Top 3
+        for stock in crossover_signals[:3]:
             telegram_sections.append(format_stock_report(stock))
     
     if high_volume_stocks:
         telegram_sections.append("\n📢 *HIGH VOLUME ALERTS*\n")
-        for stock in high_volume_stocks[:3]:  # Top 3
+        for stock in high_volume_stocks[:3]:
             telegram_sections.append(format_stock_report(stock))
     
-    if telegram_sections:
-        header = f"📈 *MOMENTUM SCAN REPORT*\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        header += f"Scanned: {len(all_stocks)} stocks\n"
-        header += "=" * 30
-        
-        final_report = header + "\n" + "\n".join(telegram_sections)
-        send_telegram_msg(final_report)
-        print("✓ Report sent to Telegram")
-    else:
-        print("No significant momentum or signals detected.")
+    # Build final report
+    header = f"📈 *MOMENTUM SCAN REPORT*\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    header += f"Scanned: {len(all_stocks)} stocks\n"
+    header += "=" * 30
     
-    # Save detailed CSV report
+    if telegram_sections:
+        final_report = header + "\n" + "\n".join(telegram_sections)
+    else:
+        # No strong signals, but still send summary
+        final_report = header + "\n\n"
+        final_report += "No strong momentum signals today.\n\n"
+        final_report += f"Top 3 stocks by score:\n"
+        for i, stock in enumerate(all_stocks[:3], 1):
+            final_report += f"{i}. *{stock['symbol']}* - Score: {stock['momentum_score']}/100\n"
+    
+    send_telegram_msg(final_report)
+    
+    # Save CSV
     df = pd.DataFrame(all_stocks)
     df = df.sort_values('momentum_score', ascending=False)
     output_file = f"momentum_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     df.to_csv(output_file, index=False)
-    print(f"✓ Detailed report saved to {output_file}")
+    print(f"✓ Detailed report saved to {output_file}\n")
