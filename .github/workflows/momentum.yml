@@ -2,34 +2,36 @@ name: Momentum Trend Bot
 
 on:
   schedule:
-    # Runs at 00:00 UTC every day (Adjustable via Cron)
+    # Runs at 00:00 UTC every day
     - cron: '0 0 * * *'
   workflow_dispatch:
-    # Allows you to trigger the bot manually from the "Actions" tab
+    # Allows you to manually trigger the bot from the "Actions" tab
 
 jobs:
   trade-and-notify:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Download your code from GitHub into the runner
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Setup the Python environment
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          # Caching dependencies speeds up the workflow
-          cache: 'pip'
 
+      # 3. Install the specific libraries needed for the script
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install yfinance pandas requests
 
+      # 4. Run the momentum bot script
       - name: Run Momentum Strategy
-        # Map your GitHub Secrets to Environment Variables
         env:
+          # These must match the names in your GitHub Repo Secrets
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python momentum.py
