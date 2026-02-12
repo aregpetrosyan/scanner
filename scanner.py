@@ -1047,7 +1047,7 @@ class EnhancedNotifier:
             msg += f"{'✅' if rec.risk_reward_ratio >= 2 else '⚠️'}\n\n"
             
             # Position sizing
-            msg += "💰 POSITION SIZING (1% account risk):\n"
+            msg += "💰 POSITION SIZING (1% risk on $20k account):\n"
             msg += f"Shares: {rec.position_size_shares}\n"
             msg += f"Risk Amount: ${rec.risk_amount:.2f}\n"
             msg += f"Potential Profit: ${rec.potential_profit:.2f}\n\n"
@@ -1173,7 +1173,7 @@ class EnhancedDipScanner:
         
         return recommendations
     
-    def run(self, ticker_file: str = "tickers.txt", account_size: float = 10000, top_n: int = 5):
+    def run(self, ticker_file: str = "tickers.txt", top_n: int = 5):
         """Main execution"""
         
         # Load tickers
@@ -1181,9 +1181,6 @@ class EnhancedDipScanner:
         if not tickers:
             logger.error("No tickers to scan")
             return
-        
-        # Update account size
-        self.recommendation_engine.account_size = account_size
         
         # Scan and generate recommendations
         recommendations = self.scan_and_recommend(tickers, top_n)
@@ -1202,10 +1199,8 @@ class EnhancedDipScanner:
 
 # === ENTRY POINT ===
 if __name__ == "__main__":
-    import sys
+    # Fixed account size - no configuration needed
+    ACCOUNT_SIZE = 20000
     
-    # Get account size from command line or use default
-    account_size = float(sys.argv[1]) if len(sys.argv) > 1 else 10000
-    
-    scanner = EnhancedDipScanner(account_size=account_size)
-    scanner.run(account_size=account_size)
+    scanner = EnhancedDipScanner(account_size=ACCOUNT_SIZE)
+    scanner.run()
