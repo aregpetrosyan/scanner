@@ -1,27 +1,50 @@
 """
-Momentum/Trend Following Trading Bot
-Uses Moving Average Crossover Strategy with Telegram notifications
+Momentum Trading Bot - GitHub Actions Version
+Designed to run on schedule (not continuous loop)
 """
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
-import time
+import os
+import json
 
-# ==================== CONFIGURATION ====================
-TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Get from @BotFather
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"      # Your chat ID
+# ==================== CONFIGURATION FROM ENV ====================
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-SYMBOL = "SPY"              # Stock/ETF to trade
-FAST_MA = 10                # Fast moving average period
-SLOW_MA = 50                # Slow moving average period
-CHECK_INTERVAL = 3600       # Check every hour (in seconds)
+SYMBOL = os.environ.get('SYMBOL', 'SPY')
+FAST_MA = int(os.environ.get('FAST_MA', 10))
+SLOW_MA = int(os.environ.get('SLOW_MA', 50))
+
+# File to track state between runs
+STATE_FILE = 'bot_state.json'
+
+# ==================== STATE MANAGEMENT ====================
+def load_state():
+    """Load previous state from file"""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_state(state):
+    """Save state to file"""
+    with open(STATE_FILE, 'w') as f:
+        json.dump(state, f, indent=2)
 
 # ==================== TELEGRAM FUNCTIONS ====================
 def send_telegram_message(message):
     """Send notification to Telegram"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram credentials not configured")
+        return None
+    
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         data = {
@@ -29,7 +52,7 @@ def send_telegram_message(message):
             "text": message,
             "parse_mode": "HTML"
         }
-        response = requests.post(url, data=data)
+        response = requests.post(url, data=data, timeout=10)
         return response.json()
     except Exception as e:
         print(f"Telegram error: {e}")
@@ -44,163 +67,170 @@ def get_data(symbol, period="3mo"):
 
 def calculate_signals(df):
     """Calculate moving averages and generate signals"""
-    # Calculate moving averages
     df['MA_Fast'] = df['Close'].rolling(window=FAST_MA).mean()
     df['MA_Slow'] = df['Close'].rolling(window=SLOW_MA).mean()
     
-    # Generate signals
     df['Signal'] = 0
-    df.loc[df['MA_Fast'] > df['MA_Slow'], 'Signal'] = 1   # Bullish (BUY)
-    df.loc[df['MA_Fast'] < df['MA_Slow'], 'Signal'] = -1  # Bearish (SELL)
+    df.loc[df['MA_Fast'] > df['MA_Slow'], 'Signal'] = 1
+    df.loc[df['MA_Fast'] < df['MA_Slow'], 'Signal'] = -1
     
-    # Detect crossovers
     df['Position'] = df['Signal'].diff()
-    # Position = 2: Bullish crossover (buy signal)
-    # Position = -2: Bearish crossover (sell signal)
     
     return df
-
-def get_current_signal(symbol):
-    """Get current trading signal"""
-    df = get_data(symbol)
-    df = calculate_signals(df)
-    
-    current = df.iloc[-1]
-    previous = df.iloc[-2]
-    
-    result = {
-        'symbol': symbol,
-        'price': current['Close'],
-        'ma_fast': current['MA_Fast'],
-        'ma_slow': current['MA_Slow'],
-        'signal': current['Signal'],
-        'crossover': current['Position']
-    }
-    
-    return result, df
 
 def check_for_signals():
-    """Main function to check for trading signals"""
+    """Check for trading signals and send notifications"""
     try:
-        result, df = get_current_signal(SYMBOL)
+        # Get data and calculate signals
+        df = get_data(SYMBOL)
+        df = calculate_signals(df)
         
-        # Check for crossovers
-        if result['crossover'] == 2:
-            # Bullish crossover - BUY SIGNAL
-            message = f"""
-🟢 <b>BUY SIGNAL - {result['symbol']}</b>
-
-Price: ${result['price']:.2f}
-Fast MA ({FAST_MA}): ${result['ma_fast']:.2f}
-Slow MA ({SLOW_MA}): ${result['ma_slow']:.2f}
-
-⬆️ Fast MA crossed ABOVE Slow MA
-Trend: BULLISH
-
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-            send_telegram_message(message)
-            print(f"BUY signal sent for {SYMBOL}")
+        current = df.iloc[-1]
+        previous = df.iloc[-2]
+        
+        # Load previous state
+        state = load_state()
+        last_signal = state.get(SYMBOL, {}).get('last_signal')
+        last_crossover_date = state.get(SYMBOL, {}).get('last_crossover_date')
+        
+        # Current signal info
+        current_signal = int(current['Signal'])
+        crossover = int(current['Position']) if not pd.isna(current['Position']) else 0
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Check if we have a NEW crossover (not already reported today)
+        new_crossover = False
+        
+        if crossover == 2 and last_crossover_date != today:  # Bullish crossover
+            new_crossover = True
+            signal_type = "BUY"
+            emoji = "🟢"
+            trend = "BULLISH"
+            direction = "⬆️ Fast MA crossed ABOVE Slow MA"
             
-        elif result['crossover'] == -2:
-            # Bearish crossover - SELL SIGNAL
+        elif crossover == -2 and last_crossover_date != today:  # Bearish crossover
+            new_crossover = True
+            signal_type = "SELL"
+            emoji = "🔴"
+            trend = "BEARISH"
+            direction = "⬇️ Fast MA crossed BELOW Slow MA"
+        
+        # Send notification if new crossover detected
+        if new_crossover:
             message = f"""
-🔴 <b>SELL SIGNAL - {result['symbol']}</b>
+{emoji} <b>{signal_type} SIGNAL - {SYMBOL}</b>
 
-Price: ${result['price']:.2f}
-Fast MA ({FAST_MA}): ${result['ma_fast']:.2f}
-Slow MA ({SLOW_MA}): ${result['ma_slow']:.2f}
+Price: ${current['Close']:.2f}
+Fast MA ({FAST_MA}): ${current['MA_Fast']:.2f}
+Slow MA ({SLOW_MA}): ${current['MA_Slow']:.2f}
 
-⬇️ Fast MA crossed BELOW Slow MA
-Trend: BEARISH
+{direction}
+Trend: {trend}
 
 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
             send_telegram_message(message)
-            print(f"SELL signal sent for {SYMBOL}")
+            print(f"✅ {signal_type} signal sent for {SYMBOL}")
+            
+            # Update state
+            state[SYMBOL] = {
+                'last_signal': signal_type,
+                'last_crossover_date': today,
+                'price': float(current['Close']),
+                'ma_fast': float(current['MA_Fast']),
+                'ma_slow': float(current['MA_Slow'])
+            }
+            save_state(state)
+            
+            # Log to file
+            log_trade(signal_type, current)
             
         else:
-            # No crossover, just status update
-            trend = "BULLISH" if result['signal'] == 1 else "BEARISH"
-            print(f"{SYMBOL}: ${result['price']:.2f} | Trend: {trend} | No crossover")
+            # No new crossover, just status
+            trend = "BULLISH" if current_signal == 1 else "BEARISH"
+            print(f"📊 {SYMBOL}: ${current['Close']:.2f} | Trend: {trend} | No new crossover")
             
-    except Exception as e:
-        error_msg = f"❌ Error checking {SYMBOL}: {str(e)}"
-        send_telegram_message(error_msg)
-        print(error_msg)
+            # Send daily status (optional - only at market close)
+            hour = datetime.now().hour
+            if hour == 16 and os.environ.get('DAILY_STATUS', 'false') == 'true':
+                status_msg = f"""
+📊 <b>Daily Status - {SYMBOL}</b>
 
-# ==================== BACKTESTING FUNCTIONS ====================
-def backtest_strategy(symbol, start_date=None, end_date=None):
-    """Backtest the momentum strategy"""
-    # Fetch data
-    if start_date and end_date:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(start=start_date, end=end_date, interval="1d")
+Price: ${current['Close']:.2f}
+Fast MA ({FAST_MA}): ${current['MA_Fast']:.2f}
+Slow MA ({SLOW_MA}): ${current['MA_Slow']:.2f}
+
+Current Trend: {trend}
+Last Signal: {last_signal or 'None'}
+
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+                send_telegram_message(status_msg)
+        
+        return {
+            'success': True,
+            'symbol': SYMBOL,
+            'price': float(current['Close']),
+            'signal': current_signal,
+            'crossover': new_crossover
+        }
+        
+    except Exception as e:
+        error_msg = f"❌ <b>Error</b>\n\nSymbol: {SYMBOL}\nError: {str(e)}"
+        send_telegram_message(error_msg)
+        print(f"Error: {e}")
+        return {'success': False, 'error': str(e)}
+
+def log_trade(signal_type, current_data):
+    """Log trades to CSV file"""
+    log_file = f'trades_{SYMBOL}.csv'
+    
+    trade_data = {
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'symbol': SYMBOL,
+        'signal': signal_type,
+        'price': current_data['Close'],
+        'ma_fast': current_data['MA_Fast'],
+        'ma_slow': current_data['MA_Slow']
+    }
+    
+    df = pd.DataFrame([trade_data])
+    
+    if os.path.exists(log_file):
+        df.to_csv(log_file, mode='a', header=False, index=False)
     else:
-        df = get_data(symbol, period="2y")
+        df.to_csv(log_file, index=False)
     
-    # Calculate signals
-    df = calculate_signals(df)
-    
-    # Simulate trading
-    df['Returns'] = df['Close'].pct_change()
-    df['Strategy_Returns'] = df['Signal'].shift(1) * df['Returns']
-    
-    # Calculate cumulative returns
-    df['Cumulative_Market'] = (1 + df['Returns']).cumprod()
-    df['Cumulative_Strategy'] = (1 + df['Strategy_Returns']).cumprod()
-    
-    # Performance metrics
-    total_return = (df['Cumulative_Strategy'].iloc[-1] - 1) * 100
-    market_return = (df['Cumulative_Market'].iloc[-1] - 1) * 100
-    
-    # Count trades
-    trades = len(df[df['Position'].abs() == 2])
-    
-    print("\n" + "="*50)
-    print(f"BACKTEST RESULTS - {symbol}")
-    print("="*50)
-    print(f"Period: {df.index[0].date()} to {df.index[-1].date()}")
-    print(f"Strategy Return: {total_return:.2f}%")
-    print(f"Buy & Hold Return: {market_return:.2f}%")
-    print(f"Outperformance: {total_return - market_return:.2f}%")
-    print(f"Total Trades: {trades}")
-    print("="*50 + "\n")
-    
-    return df
+    print(f"Trade logged to {log_file}")
 
 # ==================== MAIN EXECUTION ====================
 if __name__ == "__main__":
-    print("Momentum Trading Bot Started")
+    print("="*60)
+    print("MOMENTUM TRADING BOT - Scheduled Run")
+    print("="*60)
+    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Symbol: {SYMBOL}")
-    print(f"Fast MA: {FAST_MA}, Slow MA: {SLOW_MA}")
-    print(f"Check interval: {CHECK_INTERVAL} seconds\n")
+    print(f"Strategy: MA Crossover ({FAST_MA}/{SLOW_MA})")
+    print("="*60)
     
-    # Run backtest first
-    print("Running backtest...")
-    backtest_strategy(SYMBOL)
+    # Check if market is open (optional)
+    now = datetime.now()
+    hour = now.hour
+    day = now.weekday()
     
-    # Send startup message
-    startup_msg = f"""
-🤖 <b>Momentum Bot Started</b>
-
-Symbol: {SYMBOL}
-Strategy: MA Crossover ({FAST_MA}/{SLOW_MA})
-Interval: {CHECK_INTERVAL}s
-
-Bot is now monitoring for signals...
-"""
-    send_telegram_message(startup_msg)
+    # Only run during market hours (9:30 AM - 4:00 PM ET, Mon-Fri)
+    # Note: This is simplified; adjust for your timezone and holidays
+    if day < 5:  # Monday = 0, Friday = 4
+        result = check_for_signals()
+        
+        if result['success']:
+            print(f"\n✅ Run completed successfully")
+            print(f"Symbol: {result['symbol']}")
+            print(f"Price: ${result['price']:.2f}")
+            print(f"New crossover: {result['crossover']}")
+        else:
+            print(f"\n❌ Run failed: {result.get('error')}")
+    else:
+        print("Weekend - market closed, skipping check")
     
-    # Main loop
-    while True:
-        try:
-            check_for_signals()
-            time.sleep(CHECK_INTERVAL)
-        except KeyboardInterrupt:
-            print("\nBot stopped by user")
-            send_telegram_message("🛑 Momentum Bot Stopped")
-            break
-        except Exception as e:
-            print(f"Error in main loop: {e}")
-            time.sleep(60)  # Wait a minute before retrying
+    print("="*60)
